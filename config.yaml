@@ -1,0 +1,22 @@
+random_seed: 42
+text_fields: ["title", "abstract"]   # werden zusammengeführt
+label_key: "linsearch_codes"
+label_list_path: "labels/classes.txt"
+splits:
+  train: "data/train.jsonl"
+  dev:   "data/dev.jsonl"
+  test:  "data/test.jsonl"  # blind / größer als gold_test
+  test_gold: "data/test_gold.jsonl"
+
+embedding:
+  model_name: "intfloat/multilingual-e5-base"   # alternative: sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
+  batch_size: 256
+  max_length: 512
+  normalize: true
+  e5_use_prefix: true
+
+paths:
+  emb_dir: "embeddings/e5"                      # bei MiniLM: embeddings/minilm
+  model_out: "outputs/models/logreg_ovr.joblib"
+  thresholds_out: "outputs/thresholds.json"
+  metrics_out: "outputs/metrics.json"

@@ -1,0 +1,90 @@
+import argparse, os, json
+import numpy as np
+import yaml, joblib
+from sklearn.metrics import f1_score, precision_score, recall_score, classification_report
+from utils import set_seed, load_split, load_labels, make_mlb, save_json
+
+def apply_thresholds(y_prob, thresholds):
+    return (y_prob >= np.array(thresholds)[None, :]).astype(int)
+
+def apply_global_threshold(y_prob, thr: float):
+    return (y_prob >= thr).astype(int)
+
+def apply_topk(y_prob, k: int):
+    preds = np.zeros_like(y_prob, dtype=int)
+    # pick top-k indices per row
+    topk_idx = np.argpartition(-y_prob, kth=min(k-1, y_prob.shape[1]-1), axis=1)[:, :k]
+    # set those to 1
+    rows = np.arange(y_prob.shape[0])[:, None]
+    preds[rows, topk_idx] = 1
+    return preds
+
+def compute_metrics(y_true, y_pred):
+    return {
+        "micro_f1": float(f1_score(y_true, y_pred, average="micro", zero_division=0)),
+        "macro_f1": float(f1_score(y_true, y_pred, average="macro", zero_division=0)),
+        "micro_precision": float(precision_score(y_true, y_pred, average="micro", zero_division=0)),
+        "micro_recall": float(recall_score(y_true, y_pred, average="micro", zero_division=0)),
+        "macro_precision": float(precision_score(y_true, y_pred, average="macro", zero_division=0)),
+        "macro_recall": float(recall_score(y_true, y_pred, average="macro", zero_division=0)),
+    }
+
+def main(cfg_path: str, split_name: str, mode: str, k: int, thr: float):
+    cfg = yaml.safe_load(open(cfg_path))
+    set_seed(cfg.get("random_seed", 42))
+
+    classes = load_labels(cfg["label_list_path"])
+    mlb = make_mlb(classes)
+
+    # Load gold labels & embeddings for selected split
+    split_path = cfg["splits"][split_name]
+    _, y_raw = load_split(split_path, cfg["text_fields"], cfg["label_key"])
+    Y_true = mlb.transform(y_raw)
+    X = np.load(os.path.join(cfg["paths"]["emb_dir"], f"{split_name}.npy"))
+
+    # Load model and probabilities
+    artefact = joblib.load(cfg["paths"]["model_out"])
+    clf = artefact["model"]
+    Y_prob = clf.predict_proba(X)
+
+    # Decide decoding
+    suffix = ""
+    if mode == "threshold":
+        with open(cfg["paths"]["thresholds_out"], "r", encoding="utf-8") as f:
+            thresholds = json.load(f)["thresholds"]
+        Y_pred = apply_thresholds(Y_prob, thresholds)
+        suffix = ""
+    elif mode == "global":
+        Y_pred = apply_global_threshold(Y_prob, thr)
+        suffix = f"_global{thr:.2f}"
+    elif mode == "topk":
+        Y_pred = apply_topk(Y_prob, k)
+        suffix = f"_top{k}"
+    else:
+        raise ValueError("mode must be one of: threshold | topk | global")
+
+    # Metrics
+    metrics = compute_metrics(Y_true, Y_pred)
+    print(f"[{split_name.upper()} {mode.upper()}{suffix}] {metrics}")
+
+    # Per-class report
+    report = classification_report(
+        Y_true, Y_pred, target_names=classes, zero_division=0, output_dict=True
+    )
+
+    # Save with mode suffix
+    out_base = cfg["paths"]["metrics_out"]
+    root, ext = os.path.splitext(out_base)
+    out_path = f"{root}{suffix}{ext}"
+    save_json({"metrics": metrics, "per_class": report}, out_path)
+    print(f"Saved detailed report to {out_path}")
+
+if __name__ == "__main__":
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--config", default="config.yaml")
+    ap.add_argument("--split", default="test")          # or test_gold
+    ap.add_argument("--mode", default="threshold", choices=["threshold","topk","global"])
+    ap.add_argument("--k", type=int, default=3)         # used if mode=topk
+    ap.add_argument("--thr", type=float, default=0.5)   # used if mode=global
+    args = ap.parse_args()
+    main(args.config, args.split, args.mode, args.k, args.thr)
